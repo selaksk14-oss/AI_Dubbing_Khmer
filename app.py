@@ -5,6 +5,7 @@ import asyncio
 import nest_asyncio
 import edge_tts
 import os
+import re
 import shutil
 import time
 import tempfile
@@ -196,12 +197,52 @@ EDGE_VOICES = {
     "Piseth (បុរស — Microsoft)": "km-KH-PisethNeural",
     "Sreymom (ស្ត្រី — Microsoft)": "km-KH-SreymomNeural",
 }
+# Gemini model — updated to stable name
+GEMINI_MODEL = "gemini-2.5-flash-preview-05-20"
+
+# ═══════════════════════════════════════
+#  HELPERS — API KEY (secrets or manual)
+# ═══════════════════════════════════════
+def get_secret(key: str) -> str:
+    """Read from st.secrets first, fall back to empty string."""
+    try:
+        return st.secrets.get(key, "")
+    except Exception:
+        return ""
+
+# ═══════════════════════════════════════
+#  HELPERS — JSON parsing (robust)
+# ═══════════════════════════════════════
+def parse_json_safe(text: str):
+    """
+    Try to extract a valid JSON array from AI response text.
+    Handles markdown code fences, extra text before/after JSON, etc.
+    """
+    # 1) Strip markdown fences
+    text = re.sub(r"```(?:json)?", "", text).strip()
+    # 2) Try direct parse
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    # 3) Find first [ ... ] block
+    match = re.search(r"(\[.*\])", text, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group(1))
+        except json.JSONDecodeError:
+            pass
+    raise ValueError("AI did not return valid JSON. Please try again.")
 
 # ═══════════════════════════════════════
 #  HELPERS — TTS
 # ═══════════════════════════════════════
 async def _edge_one(text, voice, rate, path):
-    await edge_tts.Communicate(text, voice, rate=rate).save(path)
+    try:
+        await edge_tts.Communicate(text, voice, rate=rate).save(path)
+    except Exception as e:
+        # Write silent fallback so pipeline doesn't break
+        pass
 
 async def edge_tts_all(data, voice, rate):
     os.makedirs(AUDIO_DIR, exist_ok=True)
@@ -245,15 +286,21 @@ def elevenlabs_tts_all(data, voice_id, api_key):
     os.makedirs(AUDIO_DIR, exist_ok=True)
     for i, item in enumerate(data):
         p = os.path.join(AUDIO_DIR, f"seg_{i}.mp3")
-        elevenlabs_tts(item["khmer_text"], voice_id, api_key, p)
+        try:
+            elevenlabs_tts(item["khmer_text"], voice_id, api_key, p)
+        except Exception as e:
+            st.warning(f"⚠️ Segment {i+1} failed: {e}")
 
 def get_elevenlabs_voices(api_key):
-    r = requests.get("https://api.elevenlabs.io/v1/voices",
-                     headers={"xi-api-key": api_key}, timeout=20)
-    if r.status_code != 200:
+    try:
+        r = requests.get("https://api.elevenlabs.io/v1/voices",
+                         headers={"xi-api-key": api_key}, timeout=20)
+        if r.status_code != 200:
+            return {}
+        voices = r.json().get("voices", [])
+        return {v["name"]: v["voice_id"] for v in voices}
+    except Exception:
         return {}
-    voices = r.json().get("voices", [])
-    return {v["name"]: v["voice_id"] for v in voices}
 
 # ═══════════════════════════════════════
 #  HELPERS — FFmpeg
@@ -263,12 +310,12 @@ def ffmpeg_ok():
 
 def get_duration(path):
     """Return duration in seconds via ffprobe."""
-    r = subprocess.run(
-        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-         "-of", "default=noprint_wrappers=1:nokey=1", path],
-        capture_output=True, text=True
-    )
     try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", path],
+            capture_output=True, text=True, timeout=30
+        )
         return float(r.stdout.strip())
     except Exception:
         return None
@@ -290,22 +337,22 @@ def speed_adjust_segment(in_path, out_path, target_dur, max_speed=1.5):
         shutil.copy(in_path, out_path)
         return
     ratio = src_dur / target_dur
-    ratio = min(ratio, max_speed)   # cap at max_speed
-    ratio = max(ratio, 0.5)         # don't slow down below 0.5x
+    ratio = min(ratio, max_speed)
+    ratio = max(ratio, 0.5)
     if abs(ratio - 1.0) < 0.05:
         shutil.copy(in_path, out_path)
         return
     subprocess.run(
         ["ffmpeg", "-y", "-i", in_path,
          "-filter:a", f"atempo={ratio:.4f}", out_path],
-        capture_output=True
+        capture_output=True, timeout=60
     )
 
 def build_synced_audio(data, total_video_dur):
     """
     Build one long audio track with silence padding,
     each segment speed-adjusted to fit its slot.
-    Returns path to final WAV.
+    Returns path to final MP3.
     """
     parts = []
     synced_dir = os.path.join(TMP, "kd_synced")
@@ -326,24 +373,17 @@ def build_synced_audio(data, total_video_dur):
             adj = None
             adj_dur = 0
 
-        parts.append({
-            "start": start,
-            "path": adj,
-            "dur": adj_dur,
-        })
+        parts.append({"start": start, "path": adj, "dur": adj_dur})
 
-    # Build concat using ffmpeg concat filter with adelay
-    # Strategy: create silence base + overlay each segment
     silence_path = os.path.join(TMP, "kd_silence.mp3")
     subprocess.run(
         ["ffmpeg", "-y", "-f", "lavfi",
          "-i", f"anullsrc=r=44100:cl=stereo",
          "-t", str(total_video_dur + 2),
          silence_path],
-        capture_output=True
+        capture_output=True, timeout=60
     )
 
-    # Build filter_complex for amix
     inputs = ["-i", silence_path]
     filter_parts = ["[0:a]aformat=sample_rates=44100:channel_layouts=stereo[base]"]
     mix_inputs = "[base]"
@@ -376,7 +416,7 @@ def build_synced_audio(data, total_video_dur):
         ["ffmpeg", "-y"] + inputs +
         ["-filter_complex", filter_complex,
          "-map", "[out]", "-c:a", "mp3", "-q:a", "2", out_path],
-        capture_output=True
+        capture_output=True, timeout=300
     )
     return out_path
 
@@ -388,10 +428,10 @@ def mux_video(video_path, audio_path_full, output_path):
          "-map", "0:v:0", "-map", "1:a:0",
          "-shortest", "-c:v", "copy", "-c:a", "aac",
          output_path],
-        capture_output=True, text=True
+        capture_output=True, text=True, timeout=300
     )
     if r.returncode != 0:
-        raise RuntimeError(r.stderr[-600:])
+        raise RuntimeError(f"FFmpeg mux failed:\n{r.stderr[-600:]}")
 
 def extract_audio_from_video(video_path, out_path, duration=60):
     """Extract first `duration` seconds of audio for voice cloning."""
@@ -399,7 +439,7 @@ def extract_audio_from_video(video_path, out_path, duration=60):
         ["ffmpeg", "-y", "-i", video_path,
          "-t", str(duration),
          "-vn", "-acodec", "mp3", "-q:a", "2", out_path],
-        capture_output=True
+        capture_output=True, timeout=120
     )
 
 def get_video_duration(video_path):
@@ -431,12 +471,21 @@ with st.sidebar:
     st.caption("AI Video Dubbing Studio")
     st.markdown("---")
 
+    # ── Gemini API Key ──
+    # Auto-load from st.secrets if available (Streamlit Cloud deployment)
     st.markdown("**🔑 Gemini API Key**")
-    gemini_key = st.text_input("", placeholder="AIza…", type="password",
-                                key="gemini_key", label_visibility="collapsed")
+    default_gemini = get_secret("GEMINI_API_KEY")
+    gemini_key = st.text_input(
+        "", value=default_gemini,
+        placeholder="AIza…", type="password",
+        key="gemini_key", label_visibility="collapsed"
+    )
     if gemini_key:
-        genai.configure(api_key=gemini_key)
-        st.markdown('<span class="pill pill-green">✓ Gemini Connected</span>', unsafe_allow_html=True)
+        try:
+            genai.configure(api_key=gemini_key)
+            st.markdown('<span class="pill pill-green">✓ Gemini Connected</span>', unsafe_allow_html=True)
+        except Exception as e:
+            st.markdown('<span class="pill pill-red">✗ Key Error</span>', unsafe_allow_html=True)
     else:
         st.markdown('<span class="pill pill-yellow">⚠ Key needed</span>', unsafe_allow_html=True)
         st.caption("[Get free key →](https://aistudio.google.com)")
@@ -454,8 +503,12 @@ with st.sidebar:
         el_key = None
     else:
         st.markdown("**ElevenLabs API Key**")
-        el_key = st.text_input("", placeholder="sk_…", type="password",
-                                key="el_key", label_visibility="collapsed")
+        default_el = get_secret("ELEVENLABS_API_KEY")
+        el_key = st.text_input(
+            "", value=default_el,
+            placeholder="sk_…", type="password",
+            key="el_key", label_visibility="collapsed"
+        )
         st.caption("[Get free key →](https://elevenlabs.io)")
         if el_key:
             st.markdown('<span class="pill pill-green">✓ ElevenLabs Connected</span>', unsafe_allow_html=True)
@@ -468,7 +521,15 @@ with st.sidebar:
     tts_rate = speed_map[speed_lbl]
 
     st.markdown("---")
-    st.caption("v2.1 · Gemini 2.5 Flash · Edge TTS · ElevenLabs")
+    # FFmpeg status indicator
+    if ffmpeg_ok():
+        st.markdown('<span class="pill pill-green">✓ FFmpeg Ready</span>', unsafe_allow_html=True)
+    else:
+        st.markdown('<span class="pill pill-red">✗ FFmpeg Missing</span>', unsafe_allow_html=True)
+        st.caption("Video merge unavailable — audio only mode")
+
+    st.markdown("---")
+    st.caption("v2.2 · Gemini 2.5 Flash · Edge TTS · ElevenLabs")
 
 # ═══════════════════════════════════════
 #  HEADER
@@ -543,7 +604,7 @@ with tab_main:
             else:
                 btn = "🔄 Re-Dub" if st.session_state.get("done") else "🚀 Start Dubbing"
                 if st.button(btn, use_container_width=True):
-                    # Reset
+                    # Reset state
                     for k in ["dubbing_data", "done", "cloned_voice_id",
                                "full_audio", "dubbed_video"]:
                         st.session_state.pop(k, None)
@@ -554,21 +615,29 @@ with tab_main:
                         try:
                             # ── Save video to temp ──
                             with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tf:
-                                tf.write(vb); video_tmp = tf.name
+                                tf.write(vb)
+                                video_tmp = tf.name
 
                             # ── STEP 1: Gemini translate ──
                             st.write("📤 Step 1/5 — Uploading to Gemini…")
+                            genai.configure(api_key=gemini_key)
                             raw = genai.upload_file(path=video_tmp)
-                            st.write("⏳ Waiting for Google to process…")
+
+                            st.write("⏳ Waiting for Google to process video…")
+                            wait_count = 0
                             while raw.state.name == "PROCESSING":
                                 time.sleep(5)
                                 raw = genai.get_file(raw.name)
+                                wait_count += 1
+                                if wait_count > 60:  # 5min timeout
+                                    raise Exception("Gemini video processing timed out (>5 minutes).")
+
                             if raw.state.name == "FAILED":
-                                raise Exception("Google could not process the video.")
+                                raise Exception("Google could not process the video. Try a shorter/smaller file.")
 
                             st.write("🤖 Step 2/5 — AI translating to Khmer…")
                             model = genai.GenerativeModel(
-                                "gemini-2.5-flash",
+                                GEMINI_MODEL,
                                 generation_config={"response_mime_type": "application/json"}
                             )
                             prompt = """
@@ -593,7 +662,10 @@ Rules:
 - Timing must match the video precisely
 """
                             resp = model.generate_content([raw, prompt])
-                            data = json.loads(resp.text)
+                            # Robust JSON parsing — won't crash on messy AI output
+                            data = parse_json_safe(resp.text)
+                            if not isinstance(data, list) or len(data) == 0:
+                                raise ValueError("AI returned empty dubbing data. Try again.")
                             st.session_state["dubbing_data"] = data
                             st.write(f"✅ Got {len(data)} segments")
 
@@ -627,17 +699,23 @@ Rules:
                                 mux_video(video_tmp, synced_audio, dubbed_out)
                                 st.session_state["dubbed_video"] = dubbed_out
                             else:
-                                st.warning("⚠️ FFmpeg not found — skipping video merge. Download audio only.")
+                                st.warning("⚠️ FFmpeg not found — audio only mode.")
                                 st.session_state["full_audio"] = synced_audio
 
-                            os.unlink(video_tmp)
+                            # Cleanup temp video
+                            try:
+                                os.unlink(video_tmp)
+                            except Exception:
+                                pass
+
                             st.session_state["done"] = True
                             status.update(label="✅ Done!", state="complete", expanded=False)
                             st.balloons()
 
                         except Exception as e:
                             status.update(label="❌ Error", state="error")
-                            st.error(str(e))
+                            st.error(f"❌ {str(e)}")
+                            st.info("💡 Tips: ត្រូវប្រាកដថា API Key ត្រឹមត្រូវ, វីដេអូ < 100MB, និង Gemini 2.5 Flash enabled។")
 
             # ── Download section ──
             if st.session_state.get("done"):
@@ -742,10 +820,13 @@ with tab_studio:
                 if st.button("🔄", key=f"regen_{i}", help="Update audio"):
                     st.session_state["dubbing_data"][i]["khmer_text"] = new_text
                     with st.spinner(""):
-                        if voice_mode == "Edge TTS (ឥតគិតថ្លៃ)":
-                            asyncio.run(edge_tts_one(new_text, edge_voice, tts_rate, ap))
-                        elif el_key and st.session_state.get("cloned_voice_id"):
-                            elevenlabs_tts(new_text, st.session_state["cloned_voice_id"], el_key, ap)
+                        try:
+                            if voice_mode == "Edge TTS (ឥតគិតថ្លៃ)":
+                                asyncio.run(edge_tts_one(new_text, edge_voice, tts_rate, ap))
+                            elif el_key and st.session_state.get("cloned_voice_id"):
+                                elevenlabs_tts(new_text, st.session_state["cloned_voice_id"], el_key, ap)
+                        except Exception as e:
+                            st.error(f"Regen failed: {e}")
                     st.rerun()
 
             if os.path.exists(ap):
@@ -766,18 +847,22 @@ with tab_studio:
                 with st.spinner("Re-syncing and merging…"):
                     try:
                         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tf:
-                            tf.write(st.session_state["video_bytes"]); vp = tf.name
+                            tf.write(st.session_state["video_bytes"])
+                            vp = tf.name
                         vid_dur = get_video_duration(vp)
                         synced = build_synced_audio(
                             st.session_state["dubbing_data"], vid_dur
                         )
                         out = os.path.join(TMP, "kd_dubbed_edited.mp4")
                         mux_video(vp, synced, out)
-                        os.unlink(vp)
+                        try:
+                            os.unlink(vp)
+                        except Exception:
+                            pass
                         st.session_state["dubbed_video"] = out
                         st.success("✅ Done! Go to Tab 1 to download.")
                     except Exception as e:
-                        st.error(str(e))
+                        st.error(f"Re-export failed: {e}")
 
 # ═══════════════════════════════════════
 #  TAB 3 — SRT
@@ -815,4 +900,4 @@ with tab_srt:
 #  FOOTER
 # ═══════════════════════════════════════
 st.markdown("---")
-st.markdown('<p style="text-align:center;color:#b0b8d0;font-size:0.78rem;">KhmerDub v2.1 · Gemini 2.5 Flash · Edge TTS · ElevenLabs · FFmpeg</p>', unsafe_allow_html=True)
+st.markdown('<p style="text-align:center;color:#b0b8d0;font-size:0.78rem;">KhmerDub v2.2 · Gemini 2.5 Flash · Edge TTS · ElevenLabs · FFmpeg</p>', unsafe_allow_html=True)
