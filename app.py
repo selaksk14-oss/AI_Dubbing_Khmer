@@ -1,903 +1,750 @@
 import streamlit as st
 import google.generativeai as genai
-import json
-import asyncio
+import json, re, asyncio, os, shutil, time, tempfile, subprocess, requests
 import nest_asyncio
-import edge_tts
-import os
-import re
-import shutil
-import time
-import tempfile
-import subprocess
-import requests
 
 nest_asyncio.apply()
 
-# ═══════════════════════════════════════
-#  PAGE CONFIG
-# ═══════════════════════════════════════
+# ──────────────────────────────────────────
+#  CONFIG
+# ──────────────────────────────────────────
 st.set_page_config(
-    page_title="KhmerDub – AI Dubbing",
-    layout="wide",
+    page_title="KhmerDub",
     page_icon="🎙️",
+    layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# ═══════════════════════════════════════
-#  CSS
-# ═══════════════════════════════════════
+TMP       = tempfile.gettempdir()
+AUDIO_DIR = os.path.join(TMP, "kd_audio")
+GEMINI_MODELS = [
+    "gemini-2.0-flash",
+    "gemini-2.0-flash-lite",
+    "gemini-1.5-flash",
+    "gemini-1.5-flash-latest",
+    "gemini-1.5-pro",
+]
+EDGE_VOICES = {
+    "🧑 Piseth (បុរស)":  "km-KH-PisethNeural",
+    "👩 Sreymom (ស្ត្រី)": "km-KH-SreymomNeural",
+}
+
+# ──────────────────────────────────────────
+#  STYLES
+# ──────────────────────────────────────────
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@300;400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+:root {
+  --bg:       #0a0e1a;
+  --surface:  #111827;
+  --border:   #1f2d45;
+  --accent:   #3b82f6;
+  --accent2:  #8b5cf6;
+  --success:  #10b981;
+  --warn:     #f59e0b;
+  --danger:   #ef4444;
+  --text:     #e2e8f0;
+  --muted:    #64748b;
+  --radius:   12px;
+}
 
 html, body, [class*="css"] {
-    font-family: 'IBM Plex Sans', sans-serif;
-    background: #f7f8fc;
-    color: #1a1a2e;
+  font-family: 'Sora', sans-serif !important;
+  background: var(--bg) !important;
+  color: var(--text) !important;
 }
-.main { background: #f7f8fc; }
+.main { background: var(--bg) !important; }
+.block-container { padding: 2rem 2.5rem 3rem !important; max-width: 1400px; }
+
+/* Sidebar */
 section[data-testid="stSidebar"] {
-    background: #ffffff;
-    border-right: 1px solid #e8eaf0;
+  background: var(--surface) !important;
+  border-right: 1px solid var(--border) !important;
+}
+section[data-testid="stSidebar"] * { color: var(--text) !important; }
+
+/* Inputs */
+input, textarea, [data-baseweb="select"] {
+  background: #0d1526 !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 8px !important;
+  color: var(--text) !important;
+  font-family: 'Sora', sans-serif !important;
+}
+input:focus, textarea:focus {
+  border-color: var(--accent) !important;
+  box-shadow: 0 0 0 3px rgba(59,130,246,.15) !important;
 }
 
 /* Buttons */
 .stButton > button {
-    background: #1a1a2e;
-    color: #fff;
-    border: none;
-    border-radius: 8px;
-    font-family: 'IBM Plex Sans', sans-serif;
-    font-weight: 500;
-    padding: 10px 20px;
-    width: 100%;
-    transition: background 0.2s;
+  background: linear-gradient(135deg, var(--accent), var(--accent2)) !important;
+  color: #fff !important;
+  border: none !important;
+  border-radius: var(--radius) !important;
+  font-family: 'Sora', sans-serif !important;
+  font-weight: 600 !important;
+  font-size: 0.9rem !important;
+  padding: 0.65rem 1.4rem !important;
+  transition: opacity .2s, transform .15s !important;
+  width: 100% !important;
 }
-.stButton > button:hover { background: #2d2d50; }
-
-/* Inputs */
-.stTextInput input, .stTextArea textarea, .stSelectbox > div > div, .stRadio {
-    background: #ffffff !important;
-    border: 1.5px solid #e0e2ea !important;
-    border-radius: 8px !important;
-    font-family: 'IBM Plex Sans', sans-serif !important;
-    color: #1a1a2e !important;
-}
-.stTextInput input:focus, .stTextArea textarea:focus {
-    border-color: #4f6ef7 !important;
-    box-shadow: 0 0 0 3px rgba(79,110,247,0.10) !important;
-}
-
-/* Cards */
-.card {
-    background: #fff;
-    border: 1.5px solid #e8eaf0;
-    border-radius: 12px;
-    padding: 20px 22px;
-    margin-bottom: 12px;
-}
-.seg-card {
-    background: #fff;
-    border: 1.5px solid #e8eaf0;
-    border-radius: 10px;
-    padding: 14px 16px;
-    margin-bottom: 8px;
-}
-.seg-time {
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 0.75rem;
-    color: #4f6ef7;
-    background: #eef1fe;
-    padding: 2px 10px;
-    border-radius: 20px;
-    display: inline-block;
-    margin-bottom: 6px;
-}
-.seg-eng {
-    font-size: 0.82rem;
-    color: #8890b0;
-    font-style: italic;
-    margin-bottom: 6px;
-}
-
-/* Metric strip */
-.metric-strip { display: flex; gap: 10px; margin-bottom: 18px; }
-.metric-box {
-    flex: 1;
-    background: #fff;
-    border: 1.5px solid #e8eaf0;
-    border-radius: 10px;
-    padding: 14px;
-    text-align: center;
-}
-.metric-val { font-size: 1.6rem; font-weight: 600; color: #1a1a2e; line-height: 1; }
-.metric-lbl { font-size: 0.68rem; color: #9098b8; margin-top: 4px; text-transform: uppercase; letter-spacing: 0.8px; }
-
-/* Pills */
-.pill { display: inline-block; padding: 2px 10px; border-radius: 20px; font-size: 0.75rem; font-weight: 500; }
-.pill-green { background: #e8faf2; color: #22c55e; }
-.pill-blue  { background: #eef1fe; color: #4f6ef7; }
-.pill-red   { background: #fef2f2; color: #ef4444; }
-.pill-yellow{ background: #fffbeb; color: #f59e0b; }
-
-/* Section header */
-.sec-hdr {
-    font-size: 0.95rem; font-weight: 600; color: #1a1a2e;
-    margin-bottom: 12px; padding-bottom: 8px;
-    border-bottom: 2px solid #e8eaf0;
-}
-
-/* Info / Warn boxes */
-.info-box {
-    background: #f0f4ff; border: 1.5px solid #c5caf5;
-    border-radius: 10px; padding: 14px 16px;
-    font-size: 0.85rem; color: #3a4880; line-height: 1.7;
-}
-.warn-box {
-    background: #fffbeb; border: 1.5px solid #fcd34d;
-    border-radius: 10px; padding: 14px 16px;
-    font-size: 0.85rem; color: #92400e; line-height: 1.7;
-}
-.success-box {
-    background: #e8faf2; border: 1.5px solid #86efac;
-    border-radius: 10px; padding: 14px 16px;
-    font-size: 0.85rem; color: #166534; line-height: 1.7;
-}
-
-/* Steps */
-.step-row { display: flex; gap: 8px; align-items: flex-start; margin-bottom: 10px; }
-.step-num {
-    background: #1a1a2e; color: #fff;
-    width: 26px; height: 26px; border-radius: 50%;
-    display: flex; align-items: center; justify-content: center;
-    font-size: 0.78rem; font-weight: 600; flex-shrink: 0;
-}
-.step-txt { font-size: 0.88rem; color: #3a3a5e; padding-top: 3px; }
+.stButton > button:hover { opacity: .88 !important; transform: translateY(-1px) !important; }
+.stButton > button:active { transform: translateY(0) !important; }
 
 /* Tabs */
 .stTabs [data-baseweb="tab-list"] {
-    gap: 4px; background: #eef0f8;
-    border-radius: 10px; padding: 4px; border: none;
+  background: var(--surface) !important;
+  border-radius: 10px !important;
+  padding: 4px !important;
+  gap: 4px !important;
+  border: 1px solid var(--border) !important;
 }
 .stTabs [data-baseweb="tab"] {
-    border-radius: 7px; color: #6068a0;
-    font-weight: 500; font-size: 0.88rem;
+  border-radius: 7px !important;
+  color: var(--muted) !important;
+  font-weight: 500 !important;
+  font-size: 0.85rem !important;
+  padding: 0.45rem 1rem !important;
 }
 .stTabs [aria-selected="true"] {
-    background: #fff !important; color: #1a1a2e !important;
-    box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+  background: var(--accent) !important;
+  color: #fff !important;
 }
 
-/* SRT */
-.srt-box {
-    background: #fff; border: 1.5px solid #e8eaf0;
-    border-radius: 10px; padding: 16px;
-    font-family: 'IBM Plex Mono', monospace;
-    font-size: 0.82rem; color: #4a5080;
-    max-height: 320px; overflow-y: auto;
-    line-height: 1.9; white-space: pre-wrap;
+/* File uploader */
+[data-testid="stFileUploader"] {
+  background: #0d1526 !important;
+  border: 2px dashed var(--border) !important;
+  border-radius: var(--radius) !important;
 }
+[data-testid="stFileUploader"]:hover { border-color: var(--accent) !important; }
 
 /* Progress */
-.stProgress > div > div > div { background: #4f6ef7; border-radius: 4px; }
+.stProgress > div > div > div {
+  background: linear-gradient(90deg, var(--accent), var(--accent2)) !important;
+  border-radius: 4px !important;
+}
 
-/* Hide branding */
-#MainMenu, footer { visibility: hidden; }
-hr { border: none; border-top: 1.5px solid #e8eaf0; margin: 18px 0; }
+/* Status */
+[data-testid="stStatusWidget"] {
+  background: var(--surface) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: var(--radius) !important;
+}
+
+/* Radio */
+[data-testid="stRadio"] label { color: var(--text) !important; }
+
+/* Selectbox */
+[data-baseweb="select"] > div { background: #0d1526 !important; border-color: var(--border) !important; }
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+/* Hide default branding */
+#MainMenu, footer, header { visibility: hidden !important; }
+.stDeployButton { display: none !important; }
+hr { border-color: var(--border) !important; }
 </style>
 """, unsafe_allow_html=True)
 
-# ═══════════════════════════════════════
-#  CONSTANTS
-# ═══════════════════════════════════════
-TMP = tempfile.gettempdir()
-AUDIO_DIR = os.path.join(TMP, "kd_chunks")
-EDGE_VOICES = {
-    "Piseth (បុរស — Microsoft)": "km-KH-PisethNeural",
-    "Sreymom (ស្ត្រី — Microsoft)": "km-KH-SreymomNeural",
-}
-# Gemini model — updated to stable name
-GEMINI_MODEL = "gemini-1.5-flash"
+# ──────────────────────────────────────────
+#  UI HELPERS
+# ──────────────────────────────────────────
+def card(content, color="var(--border)"):
+    st.markdown(f"""
+    <div style="background:var(--surface);border:1px solid {color};
+    border-radius:var(--radius);padding:1.1rem 1.3rem;margin-bottom:.75rem;">
+    {content}</div>""", unsafe_allow_html=True)
 
-# ═══════════════════════════════════════
-#  HELPERS — API KEY (secrets or manual)
-# ═══════════════════════════════════════
-def get_secret(key: str) -> str:
-    """Read from st.secrets first, fall back to empty string."""
-    try:
-        return st.secrets.get(key, "")
-    except Exception:
-        return ""
-
-# ═══════════════════════════════════════
-#  HELPERS — JSON parsing (robust)
-# ═══════════════════════════════════════
-def parse_json_safe(text: str):
-    """
-    Try to extract a valid JSON array from AI response text.
-    Handles markdown code fences, extra text before/after JSON, etc.
-    """
-    # 1) Strip markdown fences
-    text = re.sub(r"```(?:json)?", "", text).strip()
-    # 2) Try direct parse
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-    # 3) Find first [ ... ] block
-    match = re.search(r"(\[.*\])", text, re.DOTALL)
-    if match:
-        try:
-            return json.loads(match.group(1))
-        except json.JSONDecodeError:
-            pass
-    raise ValueError("AI did not return valid JSON. Please try again.")
-
-# ═══════════════════════════════════════
-#  HELPERS — TTS
-# ═══════════════════════════════════════
-async def _edge_one(text, voice, rate, path):
-    try:
-        await edge_tts.Communicate(text, voice, rate=rate).save(path)
-    except Exception as e:
-        # Write silent fallback so pipeline doesn't break
-        pass
-
-async def edge_tts_all(data, voice, rate):
-    os.makedirs(AUDIO_DIR, exist_ok=True)
-    await asyncio.gather(*[
-        _edge_one(item["khmer_text"], voice, rate,
-                  os.path.join(AUDIO_DIR, f"seg_{i}.mp3"))
-        for i, item in enumerate(data)
-    ])
-
-async def edge_tts_one(text, voice, rate, path):
-    await _edge_one(text, voice, rate, path)
-
-def elevenlabs_tts(text, voice_id, api_key, path):
-    """ElevenLabs TTS — single segment."""
-    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
-    headers = {"xi-api-key": api_key, "Content-Type": "application/json"}
-    body = {
-        "text": text,
-        "model_id": "eleven_multilingual_v2",
-        "voice_settings": {"stability": 0.5, "similarity_boost": 0.75}
+def badge(text, color):
+    colors = {
+        "green":  ("#10b98122","#10b981"),
+        "blue":   ("#3b82f622","#3b82f6"),
+        "red":    ("#ef444422","#ef4444"),
+        "yellow": ("#f59e0b22","#f59e0b"),
+        "purple": ("#8b5cf622","#8b5cf6"),
     }
-    r = requests.post(url, json=body, headers=headers, timeout=60)
-    if r.status_code != 200:
-        raise RuntimeError(f"ElevenLabs error {r.status_code}: {r.text[:200]}")
-    with open(path, "wb") as f:
-        f.write(r.content)
+    bg, fg = colors.get(color, ("#ffffff22","#ffffff"))
+    return f'<span style="background:{bg};color:{fg};padding:2px 10px;border-radius:20px;font-size:.75rem;font-weight:600;">{text}</span>'
 
-def elevenlabs_clone_voice(sample_path, name, api_key):
-    """Upload voice sample → return voice_id."""
-    url = "https://api.elevenlabs.io/v1/voices/add"
-    headers = {"xi-api-key": api_key}
-    with open(sample_path, "rb") as f:
-        files = {"files": (os.path.basename(sample_path), f, "audio/mpeg")}
-        data = {"name": name, "description": "KhmerDub cloned voice"}
-        r = requests.post(url, headers=headers, data=data, files=files, timeout=120)
-    if r.status_code != 200:
-        raise RuntimeError(f"Clone error {r.status_code}: {r.text[:300]}")
-    return r.json()["voice_id"]
+def metric_row(items):
+    cols_html = "".join([
+        f"""<div style="flex:1;background:var(--surface);border:1px solid var(--border);
+        border-radius:10px;padding:1rem;text-align:center;">
+        <div style="font-size:1.8rem;font-weight:700;color:var(--text);line-height:1">{v}</div>
+        <div style="font-size:.65rem;color:var(--muted);margin-top:4px;text-transform:uppercase;letter-spacing:1px">{k}</div>
+        </div>""" for k, v in items
+    ])
+    st.markdown(f'<div style="display:flex;gap:10px;margin-bottom:1rem;">{cols_html}</div>',
+                unsafe_allow_html=True)
 
-def elevenlabs_tts_all(data, voice_id, api_key):
-    os.makedirs(AUDIO_DIR, exist_ok=True)
-    for i, item in enumerate(data):
-        p = os.path.join(AUDIO_DIR, f"seg_{i}.mp3")
+def section(title):
+    st.markdown(f"""
+    <div style="font-size:.8rem;font-weight:700;color:var(--muted);
+    text-transform:uppercase;letter-spacing:2px;margin-bottom:.75rem;
+    padding-bottom:.5rem;border-bottom:1px solid var(--border);">
+    {title}</div>""", unsafe_allow_html=True)
+
+# ──────────────────────────────────────────
+#  GEMINI AUTO-DETECT
+# ──────────────────────────────────────────
+def get_gemini_model(api_key: str) -> str:
+    genai.configure(api_key=api_key)
+    for name in GEMINI_MODELS:
         try:
-            elevenlabs_tts(item["khmer_text"], voice_id, api_key, p)
-        except Exception as e:
-            st.warning(f"⚠️ Segment {i+1} failed: {e}")
+            genai.GenerativeModel(name).generate_content("hi")
+            return name
+        except Exception:
+            continue
+    raise RuntimeError("គ្មាន Gemini model ណាដែល available ទេ។ សូម check API key ឬ enable Gemini API.")
 
-def get_elevenlabs_voices(api_key):
-    try:
-        r = requests.get("https://api.elevenlabs.io/v1/voices",
-                         headers={"xi-api-key": api_key}, timeout=20)
-        if r.status_code != 200:
-            return {}
-        voices = r.json().get("voices", [])
-        return {v["name"]: v["voice_id"] for v in voices}
-    except Exception:
-        return {}
+# ──────────────────────────────────────────
+#  SECRET HELPER
+# ──────────────────────────────────────────
+def get_secret(k):
+    try: return st.secrets.get(k, "")
+    except: return ""
 
-# ═══════════════════════════════════════
-#  HELPERS — FFmpeg
-# ═══════════════════════════════════════
+# ──────────────────────────────────────────
+#  JSON PARSE
+# ──────────────────────────────────────────
+def safe_json(text):
+    text = re.sub(r"```(?:json)?", "", text).strip()
+    try: return json.loads(text)
+    except: pass
+    m = re.search(r"(\[.*\])", text, re.DOTALL)
+    if m:
+        try: return json.loads(m.group(1))
+        except: pass
+    raise ValueError("AI មិន return JSON ត្រឹមត្រូវ — សូម try ម្ដងទៀត។")
+
+# ──────────────────────────────────────────
+#  FFMPEG HELPERS
+# ──────────────────────────────────────────
 def ffmpeg_ok():
     return shutil.which("ffmpeg") is not None
 
-def get_duration(path):
-    """Return duration in seconds via ffprobe."""
+def get_dur(path):
     try:
         r = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-             "-of", "default=noprint_wrappers=1:nokey=1", path],
-            capture_output=True, text=True, timeout=30
-        )
+            ["ffprobe","-v","error","-show_entries","format=duration",
+             "-of","default=noprint_wrappers=1:nokey=1",path],
+            capture_output=True, text=True, timeout=30)
         return float(r.stdout.strip())
-    except Exception:
-        return None
+    except: return None
 
-def ts_to_sec(ts):
-    """HH:MM:SS,mmm or HH:MM:SS → float seconds."""
-    ts = ts.replace(",", ".").strip()
-    parts = ts.split(":")
-    try:
-        h, m, s = float(parts[0]), float(parts[1]), float(parts[2])
-        return h * 3600 + m * 60 + s
-    except Exception:
-        return 0.0
+def ts2sec(ts):
+    ts = ts.replace(",",".").strip()
+    p  = ts.split(":")
+    try: return float(p[0])*3600+float(p[1])*60+float(p[2])
+    except: return 0.0
 
-def speed_adjust_segment(in_path, out_path, target_dur, max_speed=1.5):
-    """Speed-up audio to fit target_dur. Max speed = max_speed."""
-    src_dur = get_duration(in_path)
-    if src_dur is None or src_dur <= 0:
-        shutil.copy(in_path, out_path)
-        return
-    ratio = src_dur / target_dur
-    ratio = min(ratio, max_speed)
-    ratio = max(ratio, 0.5)
-    if abs(ratio - 1.0) < 0.05:
-        shutil.copy(in_path, out_path)
-        return
-    subprocess.run(
-        ["ffmpeg", "-y", "-i", in_path,
-         "-filter:a", f"atempo={ratio:.4f}", out_path],
-        capture_output=True, timeout=60
-    )
+def speed_seg(inp, out, target, maxspeed=1.5):
+    dur = get_dur(inp)
+    if not dur or dur<=0: shutil.copy(inp,out); return
+    ratio = min(max(dur/target, 0.5), maxspeed)
+    if abs(ratio-1.0)<0.05: shutil.copy(inp,out); return
+    subprocess.run(["ffmpeg","-y","-i",inp,"-filter:a",f"atempo={ratio:.4f}",out],
+                   capture_output=True, timeout=60)
 
-def build_synced_audio(data, total_video_dur):
-    """
-    Build one long audio track with silence padding,
-    each segment speed-adjusted to fit its slot.
-    Returns path to final MP3.
-    """
-    parts = []
-    synced_dir = os.path.join(TMP, "kd_synced")
-    os.makedirs(synced_dir, exist_ok=True)
-
-    for i, seg in enumerate(data):
-        start = ts_to_sec(seg["start_time"])
-        end   = ts_to_sec(seg["end_time"])
-        slot  = max(end - start, 0.1)
-
-        raw   = os.path.join(AUDIO_DIR, f"seg_{i}.mp3")
-        adj   = os.path.join(synced_dir, f"adj_{i}.mp3")
-
+def build_audio_track(data, total_dur):
+    synced = os.path.join(TMP,"kd_synced"); os.makedirs(synced,exist_ok=True)
+    parts=[]
+    for i,seg in enumerate(data):
+        start=ts2sec(seg["start_time"]); end=ts2sec(seg["end_time"])
+        slot=max(end-start,0.1)
+        raw=os.path.join(AUDIO_DIR,f"seg_{i}.mp3")
+        adj=os.path.join(synced,f"adj_{i}.mp3")
         if os.path.exists(raw):
-            speed_adjust_segment(raw, adj, slot)
-            adj_dur = get_duration(adj) or slot
+            speed_seg(raw,adj,slot)
+            parts.append({"start":start,"path":adj,"dur":get_dur(adj) or slot})
         else:
-            adj = None
-            adj_dur = 0
+            parts.append({"start":start,"path":None,"dur":0})
 
-        parts.append({"start": start, "path": adj, "dur": adj_dur})
+    silence=os.path.join(TMP,"kd_silence.mp3")
+    subprocess.run(["ffmpeg","-y","-f","lavfi","-i",f"anullsrc=r=44100:cl=stereo",
+                    "-t",str(total_dur+2),silence], capture_output=True, timeout=60)
 
-    silence_path = os.path.join(TMP, "kd_silence.mp3")
-    subprocess.run(
-        ["ffmpeg", "-y", "-f", "lavfi",
-         "-i", f"anullsrc=r=44100:cl=stereo",
-         "-t", str(total_video_dur + 2),
-         silence_path],
-        capture_output=True, timeout=60
-    )
-
-    inputs = ["-i", silence_path]
-    filter_parts = ["[0:a]aformat=sample_rates=44100:channel_layouts=stereo[base]"]
-    mix_inputs = "[base]"
-    valid_parts = []
-
-    idx = 1
+    inputs=["-i",silence]
+    fparts=["[0:a]aformat=sample_rates=44100:channel_layouts=stereo[base]"]
+    valid=[]; idx=1
     for p in parts:
         if p["path"] and os.path.exists(p["path"]):
-            delay_ms = int(p["start"] * 1000)
-            inputs += ["-i", p["path"]]
-            filter_parts.append(
-                f"[{idx}:a]aformat=sample_rates=44100:channel_layouts=stereo,"
-                f"adelay={delay_ms}|{delay_ms}[a{idx}]"
-            )
-            valid_parts.append(f"[a{idx}]")
-            idx += 1
+            dm=int(p["start"]*1000)
+            inputs+=["-i",p["path"]]
+            fparts.append(f"[{idx}:a]aformat=sample_rates=44100:channel_layouts=stereo,adelay={dm}|{dm}[a{idx}]")
+            valid.append(f"[a{idx}]"); idx+=1
 
-    if not valid_parts:
-        return silence_path
+    if not valid: return silence
+    all_in="[base]"+"".join(valid)
+    fparts.append(f"{all_in}amix=inputs={1+len(valid)}:duration=first:dropout_transition=0[out]")
+    out=os.path.join(TMP,"kd_full.mp3")
+    subprocess.run(["ffmpeg","-y"]+inputs+["-filter_complex",";".join(fparts),
+                    "-map","[out]","-c:a","mp3","-q:a","2",out],
+                   capture_output=True, timeout=300)
+    return out
 
-    all_inputs = mix_inputs + "".join(valid_parts)
-    n_streams = 1 + len(valid_parts)
-    filter_parts.append(
-        f"{all_inputs}amix=inputs={n_streams}:duration=first:dropout_transition=0[out]"
-    )
+def mux(vpath, apath, opath):
+    r=subprocess.run(["ffmpeg","-y","-i",vpath,"-i",apath,
+                      "-map","0:v:0","-map","1:a:0","-shortest",
+                      "-c:v","copy","-c:a","aac",opath],
+                     capture_output=True, text=True, timeout=300)
+    if r.returncode!=0: raise RuntimeError(r.stderr[-500:])
 
-    filter_complex = ";".join(filter_parts)
-    out_path = os.path.join(TMP, "kd_synced_full.mp3")
-    subprocess.run(
-        ["ffmpeg", "-y"] + inputs +
-        ["-filter_complex", filter_complex,
-         "-map", "[out]", "-c:a", "mp3", "-q:a", "2", out_path],
-        capture_output=True, timeout=300
-    )
-    return out_path
+def extract_audio(vpath, opath, dur=60):
+    subprocess.run(["ffmpeg","-y","-i",vpath,"-t",str(dur),
+                    "-vn","-acodec","mp3","-q:a","2",opath],
+                   capture_output=True, timeout=120)
 
-def mux_video(video_path, audio_path_full, output_path):
-    r = subprocess.run(
-        ["ffmpeg", "-y",
-         "-i", video_path,
-         "-i", audio_path_full,
-         "-map", "0:v:0", "-map", "1:a:0",
-         "-shortest", "-c:v", "copy", "-c:a", "aac",
-         output_path],
-        capture_output=True, text=True, timeout=300
-    )
-    if r.returncode != 0:
-        raise RuntimeError(f"FFmpeg mux failed:\n{r.stderr[-600:]}")
+# ──────────────────────────────────────────
+#  TTS HELPERS
+# ──────────────────────────────────────────
+import edge_tts
 
-def extract_audio_from_video(video_path, out_path, duration=60):
-    """Extract first `duration` seconds of audio for voice cloning."""
-    subprocess.run(
-        ["ffmpeg", "-y", "-i", video_path,
-         "-t", str(duration),
-         "-vn", "-acodec", "mp3", "-q:a", "2", out_path],
-        capture_output=True, timeout=120
-    )
+async def _tts_one(text, voice, rate, path):
+    try: await edge_tts.Communicate(text, voice, rate=rate).save(path)
+    except: pass
 
-def get_video_duration(video_path):
-    return get_duration(video_path) or 60.0
+async def tts_all(data, voice, rate):
+    os.makedirs(AUDIO_DIR, exist_ok=True)
+    await asyncio.gather(*[
+        _tts_one(seg["khmer_text"], voice, rate,
+                 os.path.join(AUDIO_DIR, f"seg_{i}.mp3"))
+        for i,seg in enumerate(data)
+    ])
 
-# ═══════════════════════════════════════
-#  HELPERS — SRT
-# ═══════════════════════════════════════
+def el_tts(text, voice_id, key, path):
+    r=requests.post(f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}",
+                    headers={"xi-api-key":key,"Content-Type":"application/json"},
+                    json={"text":text,"model_id":"eleven_multilingual_v2",
+                          "voice_settings":{"stability":.5,"similarity_boost":.75}},
+                    timeout=60)
+    if r.status_code!=200: raise RuntimeError(f"ElevenLabs {r.status_code}: {r.text[:200]}")
+    open(path,"wb").write(r.content)
+
+def el_clone(sample, name, key):
+    with open(sample,"rb") as f:
+        r=requests.post("https://api.elevenlabs.io/v1/voices/add",
+                        headers={"xi-api-key":key},
+                        data={"name":name,"description":"KhmerDub"},
+                        files={"files":(os.path.basename(sample),f,"audio/mpeg")},
+                        timeout=120)
+    if r.status_code!=200: raise RuntimeError(f"Clone {r.status_code}: {r.text[:300]}")
+    return r.json()["voice_id"]
+
+def el_tts_all(data, voice_id, key):
+    os.makedirs(AUDIO_DIR, exist_ok=True)
+    for i,seg in enumerate(data):
+        try: el_tts(seg["khmer_text"], voice_id, key, os.path.join(AUDIO_DIR,f"seg_{i}.mp3"))
+        except Exception as e: st.warning(f"⚠️ Segment {i+1}: {e}")
+
+# ──────────────────────────────────────────
+#  SRT
+# ──────────────────────────────────────────
 def build_srt(data, lang="khmer"):
-    key = "khmer_text" if lang == "khmer" else "english_text"
-    lines = []
-    for i, seg in enumerate(data, 1):
+    key = "khmer_text" if lang=="khmer" else "english_text"
+    out=[]
+    for i,seg in enumerate(data,1):
         def fix(t):
-            t = t.strip()
-            if "," not in t and "." not in t:
-                t += ",000"
-            return t.replace(".", ",")
-        lines.append(f"{i}\n{fix(seg['start_time'])} --> {fix(seg['end_time'])}\n{seg.get(key,'')}\n")
-    return "\n".join(lines)
+            t=t.strip()
+            if "," not in t and "." not in t: t+=",000"
+            return t.replace(".",",")
+        out.append(f"{i}\n{fix(seg['start_time'])} --> {fix(seg['end_time'])}\n{seg.get(key,'')}\n")
+    return "\n".join(out)
 
-def audio_path(i):
-    return os.path.join(AUDIO_DIR, f"seg_{i}.mp3")
+def apath(i): return os.path.join(AUDIO_DIR, f"seg_{i}.mp3")
 
-# ═══════════════════════════════════════
+# ──────────────────────────────────────────
 #  SIDEBAR
-# ═══════════════════════════════════════
+# ──────────────────────────────────────────
 with st.sidebar:
-    st.markdown("## 🎙️ KhmerDub")
-    st.caption("AI Video Dubbing Studio")
-    st.markdown("---")
+    # Logo
+    st.markdown("""
+    <div style="padding:1.2rem 0 .5rem;">
+      <div style="font-size:1.5rem;font-weight:700;letter-spacing:-1px;">
+        🎙️ KhmerDub
+      </div>
+      <div style="font-size:.75rem;color:var(--muted);margin-top:2px;">
+        AI Video Dubbing · v3.0
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+    st.divider()
 
-    # ── Gemini API Key ──
-    # Auto-load from st.secrets if available (Streamlit Cloud deployment)
-    st.markdown("**🔑 Gemini API Key**")
-    default_gemini = get_secret("GEMINI_API_KEY")
-    gemini_key = st.text_input(
-        "", value=default_gemini,
-        placeholder="AIza…", type="password",
-        key="gemini_key", label_visibility="collapsed"
-    )
+    # ── Gemini Key ──
+    section("🔑 Gemini API Key")
+    gemini_key = st.text_input("gemini", value=get_secret("GEMINI_API_KEY"),
+                                placeholder="AIza…", type="password",
+                                label_visibility="collapsed")
     if gemini_key:
-        try:
-            genai.configure(api_key=gemini_key)
-            st.markdown('<span class="pill pill-green">✓ Gemini Connected</span>', unsafe_allow_html=True)
-        except Exception as e:
-            st.markdown('<span class="pill pill-red">✗ Key Error</span>', unsafe_allow_html=True)
+        st.markdown(badge("✓ Connected","green"), unsafe_allow_html=True)
     else:
-        st.markdown('<span class="pill pill-yellow">⚠ Key needed</span>', unsafe_allow_html=True)
-        st.caption("[Get free key →](https://aistudio.google.com)")
+        st.markdown(badge("⚠ Key needed","yellow"), unsafe_allow_html=True)
+        st.caption("👉 [Get free key](https://aistudio.google.com)")
 
-    st.markdown("---")
-    st.markdown("**🎙️ Voice Mode**")
-    voice_mode = st.radio(
-        "", ["Edge TTS (ឥតគិតថ្លៃ)", "ElevenLabs Clone (API Key)"],
-        label_visibility="collapsed"
-    )
+    st.divider()
 
-    if voice_mode == "Edge TTS (ឥតគិតថ្លៃ)":
-        voice_lbl = st.selectbox("Voice", list(EDGE_VOICES.keys()))
+    # ── Voice Mode ──
+    section("🎙️ Voice Engine")
+    voice_mode = st.radio("vm", ["Edge TTS (ឥតគិតថ្លៃ)", "ElevenLabs (Clone)"],
+                          label_visibility="collapsed")
+
+    if voice_mode.startswith("Edge"):
+        voice_lbl  = st.selectbox("Voice", list(EDGE_VOICES.keys()))
         edge_voice = EDGE_VOICES[voice_lbl]
-        el_key = None
+        el_key     = None
+        speed_map  = {"យឺត":"-20%","ធម្មតា":"+0%","លឿន":"+15%","លឿនខ្លាំង":"+30%"}
+        speed_lbl  = st.select_slider("ល្បឿន", list(speed_map.keys()), value="ធម្មតា")
+        tts_rate   = speed_map[speed_lbl]
     else:
-        st.markdown("**ElevenLabs API Key**")
-        default_el = get_secret("ELEVENLABS_API_KEY")
-        el_key = st.text_input(
-            "", value=default_el,
-            placeholder="sk_…", type="password",
-            key="el_key", label_visibility="collapsed"
-        )
-        st.caption("[Get free key →](https://elevenlabs.io)")
-        if el_key:
-            st.markdown('<span class="pill pill-green">✓ ElevenLabs Connected</span>', unsafe_allow_html=True)
         edge_voice = None
+        tts_rate   = "+0%"
+        section("ElevenLabs Key")
+        el_key = st.text_input("el", value=get_secret("ELEVENLABS_API_KEY"),
+                                placeholder="sk_…", type="password",
+                                label_visibility="collapsed")
+        if el_key:
+            st.markdown(badge("✓ Connected","purple"), unsafe_allow_html=True)
+        st.caption("👉 [Get free key](https://elevenlabs.io)")
 
-    st.markdown("---")
-    st.markdown("**⚡ Speed (Edge TTS)**")
-    speed_map = {"យឺត –20%": "-20%", "ធម្មតា": "+0%", "លឿន +15%": "+15%", "លឿនខ្លាំង +30%": "+30%"}
-    speed_lbl = st.selectbox("", list(speed_map.keys()), index=1, label_visibility="collapsed")
-    tts_rate = speed_map[speed_lbl]
+    st.divider()
 
-    st.markdown("---")
-    # FFmpeg status indicator
-    if ffmpeg_ok():
-        st.markdown('<span class="pill pill-green">✓ FFmpeg Ready</span>', unsafe_allow_html=True)
-    else:
-        st.markdown('<span class="pill pill-red">✗ FFmpeg Missing</span>', unsafe_allow_html=True)
-        st.caption("Video merge unavailable — audio only mode")
+    # ── System status ──
+    section("⚙️ System")
+    ffok = ffmpeg_ok()
+    st.markdown(
+        badge("✓ FFmpeg Ready","green") if ffok else badge("✗ FFmpeg Missing","red"),
+        unsafe_allow_html=True
+    )
+    if not ffok:
+        st.caption("Video merge unavailable — audio only")
 
-    st.markdown("---")
-    st.caption("v2.2 · Gemini 2.5 Flash · Edge TTS · ElevenLabs")
-
-# ═══════════════════════════════════════
+# ──────────────────────────────────────────
 #  HEADER
-# ═══════════════════════════════════════
-st.markdown("## 🎙️ KhmerDub — AI Video Dubbing")
-st.markdown('<p style="color:#6068a0;margin-top:-12px;margin-bottom:20px;">Upload វីដេអូ → AI បកប្រែ → បង្កើតសំឡេង → Download MP4 ខ្មែរ</p>', unsafe_allow_html=True)
+# ──────────────────────────────────────────
+st.markdown("""
+<div style="margin-bottom:1.5rem;">
+  <h1 style="font-size:2rem;font-weight:700;letter-spacing:-1.5px;
+  background:linear-gradient(135deg,#3b82f6,#8b5cf6);
+  -webkit-background-clip:text;-webkit-text-fill-color:transparent;
+  margin-bottom:4px;">KhmerDub AI</h1>
+  <p style="color:var(--muted);font-size:.9rem;margin:0;">
+  Upload វីដេអូ · AI បកប្រែ · TTS ខ្មែរ · Export MP4
+  </p>
+</div>
+""", unsafe_allow_html=True)
 
-# ═══════════════════════════════════════
+# ──────────────────────────────────────────
 #  TABS
-# ═══════════════════════════════════════
-tab_main, tab_studio, tab_srt = st.tabs([
-    "🚀  One-Click Dub",
-    "🎛️  Dubbing Studio",
-    "📝  SRT Subtitle",
-])
+# ──────────────────────────────────────────
+t1, t2, t3 = st.tabs(["🚀 Dub","🎛 Studio","📝 SRT"])
 
-# ═══════════════════════════════════════
-#  TAB 1 — ONE-CLICK DUB
-# ═══════════════════════════════════════
-with tab_main:
-    col_left, col_right = st.columns([1.4, 1], gap="large")
+# ══════════════════════════════════════════
+#  TAB 1 — DUB
+# ══════════════════════════════════════════
+with t1:
+    L, R = st.columns([3, 2], gap="large")
 
-    with col_left:
-        st.markdown('<div class="sec-hdr">📤 Upload វីដេអូ</div>', unsafe_allow_html=True)
-        uploaded = st.file_uploader(
-            "MP4 / MOV / MKV / AVI",
-            type=["mp4", "mov", "mkv", "avi"],
-            label_visibility="visible"
-        )
+    with L:
+        section("📤 Upload វីដេអូ")
+        up = st.file_uploader("vid", type=["mp4","mov","mkv","avi"],
+                               label_visibility="collapsed")
+        if up:
+            if st.session_state.get("vname") != up.name:
+                st.session_state.update({
+                    "vname": up.name, "vbytes": up.read(),
+                    "data": None, "done": False,
+                    "cloned_id": None, "audio_out": None, "vid_out": None
+                })
+                if os.path.exists(AUDIO_DIR): shutil.rmtree(AUDIO_DIR)
+            st.video(st.session_state["vbytes"])
 
-        if uploaded:
-            if st.session_state.get("video_name") != uploaded.name:
-                st.session_state["video_name"]  = uploaded.name
-                st.session_state["video_bytes"] = uploaded.read()
-                for k in ["dubbing_data", "done", "cloned_voice_id",
-                          "full_audio", "dubbed_video"]:
-                    st.session_state.pop(k, None)
-                if os.path.exists(AUDIO_DIR):
-                    shutil.rmtree(AUDIO_DIR)
-            st.video(st.session_state["video_bytes"])
-
-    with col_right:
-        st.markdown('<div class="sec-hdr">⚙️ Controls</div>', unsafe_allow_html=True)
-
-        if not uploaded:
+    with R:
+        section("⚙️ Controls")
+        if not up:
             st.markdown("""
-            <div class="info-box">
-            <b>របៀបប្រើ:</b><br><br>
-            <div class="step-row"><div class="step-num">1</div><div class="step-txt">Upload វីដេអូ MP4</div></div>
-            <div class="step-row"><div class="step-num">2</div><div class="step-txt">បញ្ចូល API Keys នៅ Sidebar</div></div>
-            <div class="step-row"><div class="step-num">3</div><div class="step-txt">ចុច <b>Start Dubbing</b></div></div>
-            <div class="step-row"><div class="step-num">4</div><div class="step-txt">ទទួល MP4 ខ្មែរ + SRT</div></div>
-            </div>
-            """, unsafe_allow_html=True)
+            <div style="background:var(--surface);border:1px solid var(--border);
+            border-radius:var(--radius);padding:1.4rem;line-height:2;">
+            <b style="color:var(--accent)">របៀបប្រើ</b><br>
+            <span style="color:var(--muted);font-size:.85rem;">
+            ① Upload វីដេអូ MP4/MOV<br>
+            ② ដាក់ Gemini API Key នៅ Sidebar<br>
+            ③ ជ្រើស Voice Engine<br>
+            ④ ចុច <b style="color:var(--text)">Start Dubbing</b><br>
+            ⑤ Download MP4 ខ្មែរ 🎉
+            </span></div>""", unsafe_allow_html=True)
         else:
-            vb = st.session_state["video_bytes"]
-            segs = len(st.session_state.get("dubbing_data", []))
-            sz = len(vb) / 1_000_000
+            vb   = st.session_state["vbytes"]
+            segs = len(st.session_state.get("data") or [])
+            sz   = len(vb)/1e6
+            metric_row([
+                ("MB", f"{sz:.1f}"),
+                ("Segments", segs),
+                ("Status", "✓" if st.session_state.get("done") else "—"),
+            ])
 
-            st.markdown(f"""
-            <div class="metric-strip">
-                <div class="metric-box"><div class="metric-val">{sz:.1f}</div><div class="metric-lbl">MB</div></div>
-                <div class="metric-box"><div class="metric-val">{segs}</div><div class="metric-lbl">Segments</div></div>
-                <div class="metric-box"><div class="metric-val">{"✓" if st.session_state.get("done") else "—"}</div><div class="metric-lbl">Done</div></div>
-            </div>
-            """, unsafe_allow_html=True)
-
+            # Validate before showing button
             if not gemini_key:
-                st.warning("⚠️ សូមបញ្ចូល Gemini API Key នៅ Sidebar")
-            elif voice_mode == "ElevenLabs Clone (API Key)" and not el_key:
-                st.warning("⚠️ សូមបញ្ចូល ElevenLabs API Key នៅ Sidebar")
+                st.warning("⚠️ ត្រូវការ Gemini API Key")
+            elif voice_mode.startswith("ElevenLabs") and not el_key:
+                st.warning("⚠️ ត្រូវការ ElevenLabs API Key")
             else:
-                btn = "🔄 Re-Dub" if st.session_state.get("done") else "🚀 Start Dubbing"
-                if st.button(btn, use_container_width=True):
-                    # Reset state
-                    for k in ["dubbing_data", "done", "cloned_voice_id",
-                               "full_audio", "dubbed_video"]:
-                        st.session_state.pop(k, None)
-                    if os.path.exists(AUDIO_DIR):
-                        shutil.rmtree(AUDIO_DIR)
+                label = "🔄 Re-Dub" if st.session_state.get("done") else "🚀 Start Dubbing"
+                if st.button(label, use_container_width=True):
+                    st.session_state.update({
+                        "data": None, "done": False,
+                        "cloned_id": None, "audio_out": None, "vid_out": None
+                    })
+                    if os.path.exists(AUDIO_DIR): shutil.rmtree(AUDIO_DIR)
 
-                    with st.status("🔄 Processing…", expanded=True) as status:
+                    with st.status("⚡ Processing…", expanded=True) as status:
                         try:
-                            # ── Save video to temp ──
-                            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tf:
-                                tf.write(vb)
-                                video_tmp = tf.name
+                            # Save video
+                            with tempfile.NamedTemporaryFile(delete=False,suffix=".mp4") as tf:
+                                tf.write(vb); vtmp=tf.name
 
-                            # ── STEP 1: Gemini translate ──
-                            st.write("📤 Step 1/5 — Uploading to Gemini…")
+                            # Step 1 — Upload to Gemini
+                            st.write("📤 **Step 1/5** — Uploading video to Gemini…")
                             genai.configure(api_key=gemini_key)
-                            raw = genai.upload_file(path=video_tmp)
+                            gfile = genai.upload_file(path=vtmp)
+                            st.write("⏳ **Step 1/5** — Processing…")
+                            t0=time.time()
+                            while gfile.state.name=="PROCESSING":
+                                if time.time()-t0>300: raise Exception("Gemini processing timeout (5min).")
+                                time.sleep(4)
+                                gfile=genai.get_file(gfile.name)
+                            if gfile.state.name=="FAILED":
+                                raise Exception("Google failed to process video. Try smaller/shorter file.")
 
-                            st.write("⏳ Waiting for Google to process video…")
-                            wait_count = 0
-                            while raw.state.name == "PROCESSING":
-                                time.sleep(5)
-                                raw = genai.get_file(raw.name)
-                                wait_count += 1
-                                if wait_count > 60:  # 5min timeout
-                                    raise Exception("Gemini video processing timed out (>5 minutes).")
-
-                            if raw.state.name == "FAILED":
-                                raise Exception("Google could not process the video. Try a shorter/smaller file.")
-
-                            st.write("🤖 Step 2/5 — AI translating to Khmer…")
+                            # Step 2 — Translate
+                            st.write("🤖 **Step 2/5** — Detecting model & translating…")
+                            mname = get_gemini_model(gemini_key)
+                            st.write(f"   ✓ Using **{mname}**")
                             model = genai.GenerativeModel(
-                                GEMINI_MODEL,
-                                generation_config={"response_mime_type": "application/json"}
+                                mname,
+                                generation_config={"response_mime_type":"application/json"}
                             )
                             prompt = """
-Listen carefully to ALL spoken dialogue in this video.
-Translate every line into natural, fluent Khmer suitable for professional dubbing.
+Listen to ALL dialogue in this video. Translate every spoken line into natural, fluent Khmer for professional dubbing.
 
-Return ONLY a valid JSON array — no markdown, no explanation:
-[
-  {
-    "start_time": "HH:MM:SS,mmm",
-    "end_time": "HH:MM:SS,mmm",
-    "english_text": "original spoken words",
-    "khmer_text": "ការបកប្រែជាភាសាខ្មែរ"
-  }
-]
+Return ONLY a JSON array, no extra text:
+[{"start_time":"HH:MM:SS,mmm","end_time":"HH:MM:SS,mmm","english_text":"...","khmer_text":"..."}]
 
 Rules:
-- Capture every spoken word accurately
-- Khmer must sound natural when read aloud (dubbing style)
-- Use polite Khmer unless speech is casual
-- Preserve emotion and intent of original speaker
-- Timing must match the video precisely
+- Capture every spoken word
+- Natural Khmer for dubbing (not literal translation)
+- Polite register unless speech is casual
+- Preserve emotion and intent
+- Precise timing
 """
-                            resp = model.generate_content([raw, prompt])
-                            # Robust JSON parsing — won't crash on messy AI output
-                            data = parse_json_safe(resp.text)
-                            if not isinstance(data, list) or len(data) == 0:
-                                raise ValueError("AI returned empty dubbing data. Try again.")
-                            st.session_state["dubbing_data"] = data
-                            st.write(f"✅ Got {len(data)} segments")
+                            resp  = model.generate_content([gfile, prompt])
+                            data  = safe_json(resp.text)
+                            if not isinstance(data,list) or not data:
+                                raise ValueError("AI returned empty data. Try again.")
+                            st.session_state["data"] = data
+                            st.write(f"✅ **Step 2/5** — Got **{len(data)} segments**")
 
-                            # ── STEP 2: Voice Clone (if ElevenLabs) ──
-                            if voice_mode == "ElevenLabs Clone (API Key)":
-                                st.write("🎤 Step 3/5 — Extracting voice from video for cloning…")
-                                sample_path = os.path.join(TMP, "kd_voice_sample.mp3")
-                                extract_audio_from_video(video_tmp, sample_path, duration=60)
-
-                                st.write("🔬 Cloning voice with ElevenLabs…")
-                                voice_id = elevenlabs_clone_voice(
-                                    sample_path, f"KhmerDub_{int(time.time())}", el_key
-                                )
-                                st.session_state["cloned_voice_id"] = voice_id
-                                st.write("✅ Voice cloned!")
-
-                                st.write("🎙️ Step 4/5 — Generating Khmer audio (ElevenLabs)…")
-                                elevenlabs_tts_all(data, voice_id, el_key)
+                            # Step 3 — TTS
+                            if voice_mode.startswith("ElevenLabs"):
+                                st.write("🎤 **Step 3/5** — Extracting voice for cloning…")
+                                sp=os.path.join(TMP,"kd_sample.mp3")
+                                extract_audio(vtmp,sp,60)
+                                st.write("🔬 **Step 3/5** — Cloning voice (ElevenLabs)…")
+                                vid=el_clone(sp,f"KhmerDub_{int(time.time())}",el_key)
+                                st.session_state["cloned_id"]=vid
+                                st.write("🎙️ **Step 4/5** — Generating Khmer audio…")
+                                el_tts_all(data,vid,el_key)
                             else:
-                                st.write(f"🎙️ Step 3/5 — Generating {len(data)} Khmer audio segments…")
-                                asyncio.run(edge_tts_all(data, edge_voice, tts_rate))
+                                st.write(f"🎙️ **Step 3/5** — Generating {len(data)} audio segments…")
+                                asyncio.run(tts_all(data, edge_voice, tts_rate))
+                                st.write("✅ **Step 3/5** — Audio generated")
 
-                            # ── STEP 3: Sync + Merge ──
-                            st.write("⚙️ Step 4/5 — Speed-adjusting & syncing to video timing…")
-                            vid_dur = get_video_duration(video_tmp)
-                            synced_audio = build_synced_audio(data, vid_dur)
+                            # Step 4 — Sync
+                            st.write("⚙️ **Step 4/5** — Syncing audio to video timing…")
+                            vdur = get_dur(vtmp) or 60.0
+                            aout = build_audio_track(data, vdur)
+                            st.session_state["audio_out"] = aout
 
-                            if ffmpeg_ok():
-                                st.write("🎬 Step 5/5 — Merging audio into video…")
-                                dubbed_out = os.path.join(TMP, "kd_dubbed_final.mp4")
-                                mux_video(video_tmp, synced_audio, dubbed_out)
-                                st.session_state["dubbed_video"] = dubbed_out
+                            # Step 5 — Merge
+                            if ffok:
+                                st.write("🎬 **Step 5/5** — Merging into final video…")
+                                vout=os.path.join(TMP,"kd_final.mp4")
+                                mux(vtmp,aout,vout)
+                                st.session_state["vid_out"]=vout
                             else:
-                                st.warning("⚠️ FFmpeg not found — audio only mode.")
-                                st.session_state["full_audio"] = synced_audio
+                                st.warning("⚠️ FFmpeg missing — audio only mode")
 
-                            # Cleanup temp video
-                            try:
-                                os.unlink(video_tmp)
-                            except Exception:
-                                pass
+                            try: os.unlink(vtmp)
+                            except: pass
 
-                            st.session_state["done"] = True
+                            st.session_state["done"]=True
                             status.update(label="✅ Done!", state="complete", expanded=False)
                             st.balloons()
 
                         except Exception as e:
                             status.update(label="❌ Error", state="error")
-                            st.error(f"❌ {str(e)}")
-                            st.info("💡 Tips: ត្រូវប្រាកដថា API Key ត្រឹមត្រូវ, វីដេអូ < 100MB, និង Gemini 2.5 Flash enabled។")
+                            st.error(f"**Error:** {e}")
+                            st.info("💡 **Tips:** ពិនិត្យ API key · វីដេអូ < 100MB · enable Gemini API")
 
-            # ── Download section ──
+            # Downloads
             if st.session_state.get("done"):
-                st.markdown("---")
-                st.markdown("### 📥 Downloads")
+                st.divider()
+                section("📥 Downloads")
 
-                # Dubbed Video
-                if st.session_state.get("dubbed_video") and \
-                   os.path.exists(st.session_state["dubbed_video"]):
-                    with open(st.session_state["dubbed_video"], "rb") as f:
-                        st.download_button(
-                            "🎬 Download Dubbed Video (.mp4)",
-                            data=f,
-                            file_name="khmer_dubbed.mp4",
-                            mime="video/mp4",
-                            use_container_width=True
-                        )
-                    st.video(st.session_state["dubbed_video"])
+                vout = st.session_state.get("vid_out")
+                aout = st.session_state.get("audio_out")
+                data = st.session_state.get("data",[])
 
-                # Full audio fallback
-                elif st.session_state.get("full_audio") and \
-                     os.path.exists(st.session_state["full_audio"]):
-                    with open(st.session_state["full_audio"], "rb") as f:
-                        st.download_button(
-                            "🎵 Download Khmer Audio (.mp3)",
-                            data=f,
-                            file_name="khmer_voiceover.mp3",
-                            mime="audio/mp3",
-                            use_container_width=True
-                        )
+                if vout and os.path.exists(vout):
+                    with open(vout,"rb") as f:
+                        st.download_button("🎬 Download Dubbed Video (.mp4)", f,
+                                           "khmer_dubbed.mp4","video/mp4",
+                                           use_container_width=True)
+                    st.video(vout)
+                elif aout and os.path.exists(aout):
+                    with open(aout,"rb") as f:
+                        st.download_button("🎵 Download Khmer Audio (.mp3)", f,
+                                           "khmer_voiceover.mp3","audio/mp3",
+                                           use_container_width=True)
 
-                # SRT downloads
-                data = st.session_state.get("dubbing_data", [])
                 if data:
-                    c1, c2 = st.columns(2)
+                    c1,c2=st.columns(2)
                     with c1:
-                        st.download_button(
-                            "📝 SRT ខ្មែរ",
-                            build_srt(data, "khmer").encode("utf-8"),
-                            "khmer.srt", "text/plain",
-                            use_container_width=True
-                        )
+                        st.download_button("📝 SRT ខ្មែរ",
+                                           build_srt(data,"khmer").encode("utf-8"),
+                                           "khmer.srt","text/plain",
+                                           use_container_width=True)
                     with c2:
-                        st.download_button(
-                            "📝 SRT English",
-                            build_srt(data, "english").encode("utf-8"),
-                            "english.srt", "text/plain",
-                            use_container_width=True
-                        )
+                        st.download_button("📝 SRT English",
+                                           build_srt(data,"english").encode("utf-8"),
+                                           "english.srt","text/plain",
+                                           use_container_width=True)
 
-# ═══════════════════════════════════════
-#  TAB 2 — DUBBING STUDIO (Edit segments)
-# ═══════════════════════════════════════
-with tab_studio:
-    data = st.session_state.get("dubbing_data")
+# ══════════════════════════════════════════
+#  TAB 2 — STUDIO
+# ══════════════════════════════════════════
+with t2:
+    data = st.session_state.get("data")
     if not data:
-        st.info("🚀 Run **One-Click Dub** first to see segments here.")
+        st.info("🚀 Run **Dub** tab first.")
     else:
-        n = len(data)
-        ready = sum(1 for i in range(n) if os.path.exists(audio_path(i)))
+        n     = len(data)
+        ready = sum(1 for i in range(n) if os.path.exists(apath(i)))
 
-        st.markdown(f"""
-        <div class="metric-strip">
-            <div class="metric-box"><div class="metric-val">{n}</div><div class="metric-lbl">Segments</div></div>
-            <div class="metric-box"><div class="metric-val">{ready}</div><div class="metric-lbl">Audio</div></div>
-            <div class="metric-box"><div class="metric-val">{voice_mode.split()[0]}</div><div class="metric-lbl">Mode</div></div>
-        </div>
-        """, unsafe_allow_html=True)
+        metric_row([
+            ("Segments", n),
+            ("Audio Ready", ready),
+            ("Engine", voice_mode.split()[0]),
+        ])
 
-        # Regen all
-        col_ra, col_rb = st.columns([3, 1])
-        with col_rb:
-            if st.button("🔄 Regen All Audio"):
-                with st.spinner("Regenerating…"):
-                    if voice_mode == "Edge TTS (ឥតគិតថ្លៃ)":
-                        asyncio.run(edge_tts_all(data, edge_voice, tts_rate))
-                    elif el_key and st.session_state.get("cloned_voice_id"):
-                        elevenlabs_tts_all(data, st.session_state["cloned_voice_id"], el_key)
+        c1,c2=st.columns([5,1])
+        with c2:
+            if st.button("🔄 Regen All"):
+                with st.spinner("Regenerating all…"):
+                    if voice_mode.startswith("Edge"):
+                        asyncio.run(tts_all(data,edge_voice,tts_rate))
+                    elif el_key and st.session_state.get("cloned_id"):
+                        el_tts_all(data,st.session_state["cloned_id"],el_key)
                 st.rerun()
 
-        st.markdown("---")
+        st.divider()
+        for i,seg in enumerate(data):
+            ap=apath(i)
+            with st.container():
+                st.markdown(f"""
+                <div style="background:var(--surface);border:1px solid var(--border);
+                border-radius:10px;padding:.9rem 1rem;margin-bottom:.5rem;">
+                <span style="background:#3b82f622;color:#3b82f6;padding:2px 8px;
+                border-radius:12px;font-family:'JetBrains Mono',monospace;font-size:.72rem;">
+                ⏱ {seg['start_time']} → {seg['end_time']}</span>
+                <span style="float:right;color:var(--muted);font-size:.72rem;">#{i+1}</span>
+                <div style="color:var(--muted);font-size:.8rem;font-style:italic;
+                margin-top:.4rem;">🇺🇸 {seg.get('english_text','')}</div>
+                </div>""", unsafe_allow_html=True)
 
-        for i, seg in enumerate(data):
-            ap = audio_path(i)
-            st.markdown(f"""
-            <div class="seg-card">
-                <span class="seg-time">⏱ {seg['start_time']} → {seg['end_time']}</span>
-                <span style="float:right;font-size:0.75rem;color:#b0b8d0;">#{i+1}</span>
-                <div class="seg-eng">🇺🇸 {seg.get('english_text','')}</div>
-            </div>
-            """, unsafe_allow_html=True)
-
-            col_t, col_b = st.columns([4, 1])
-            with col_t:
-                new_text = st.text_area(
-                    f"#{i+1}", value=seg["khmer_text"],
-                    key=f"kh_{i}", height=74,
-                    label_visibility="collapsed"
-                )
-            with col_b:
-                st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
-                if st.button("🔄", key=f"regen_{i}", help="Update audio"):
-                    st.session_state["dubbing_data"][i]["khmer_text"] = new_text
-                    with st.spinner(""):
+                ct,cb=st.columns([5,1])
+                with ct:
+                    new_t=st.text_area(f"s{i}", value=seg["khmer_text"],
+                                       key=f"kh_{i}", height=70,
+                                       label_visibility="collapsed")
+                with cb:
+                    st.markdown("<div style='height:20px'></div>",unsafe_allow_html=True)
+                    if st.button("▶",key=f"r{i}",help="Regenerate"):
+                        st.session_state["data"][i]["khmer_text"]=new_t
                         try:
-                            if voice_mode == "Edge TTS (ឥតគិតថ្លៃ)":
-                                asyncio.run(edge_tts_one(new_text, edge_voice, tts_rate, ap))
-                            elif el_key and st.session_state.get("cloned_voice_id"):
-                                elevenlabs_tts(new_text, st.session_state["cloned_voice_id"], el_key, ap)
+                            if voice_mode.startswith("Edge"):
+                                asyncio.run(_tts_one(new_t,edge_voice,tts_rate,ap))
+                            elif el_key and st.session_state.get("cloned_id"):
+                                el_tts(new_t,st.session_state["cloned_id"],el_key,ap)
                         except Exception as e:
-                            st.error(f"Regen failed: {e}")
-                    st.rerun()
+                            st.error(str(e))
+                        st.rerun()
 
-            if os.path.exists(ap):
-                st.audio(ap, format="audio/mp3")
+                if os.path.exists(ap):
+                    st.audio(ap, format="audio/mp3")
+                else:
+                    st.markdown(badge("✗ No audio","red"),unsafe_allow_html=True)
+                st.markdown("<div style='height:2px'></div>",unsafe_allow_html=True)
+
+        st.divider()
+        if st.button("🎬 Re-export Video (after edits)", use_container_width=True):
+            if "vbytes" not in st.session_state:
+                st.error("Video not found — re-upload in Dub tab.")
+            elif not ffok:
+                st.error("FFmpeg not available.")
             else:
-                st.markdown('<span class="pill pill-red">✕ No audio</span>', unsafe_allow_html=True)
-
-            st.markdown("<div style='height:4px'></div>", unsafe_allow_html=True)
-
-        # Re-export after edits
-        st.markdown("---")
-        if st.button("🎬 Re-export Dubbed Video (after edits)", use_container_width=True):
-            if "video_bytes" not in st.session_state:
-                st.error("Video not found. Re-upload in Tab 1.")
-            elif not ffmpeg_ok():
-                st.error("FFmpeg not available on this server.")
-            else:
-                with st.spinner("Re-syncing and merging…"):
+                with st.spinner("Re-syncing…"):
                     try:
-                        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tf:
-                            tf.write(st.session_state["video_bytes"])
-                            vp = tf.name
-                        vid_dur = get_video_duration(vp)
-                        synced = build_synced_audio(
-                            st.session_state["dubbing_data"], vid_dur
-                        )
-                        out = os.path.join(TMP, "kd_dubbed_edited.mp4")
-                        mux_video(vp, synced, out)
-                        try:
-                            os.unlink(vp)
-                        except Exception:
-                            pass
-                        st.session_state["dubbed_video"] = out
-                        st.success("✅ Done! Go to Tab 1 to download.")
+                        with tempfile.NamedTemporaryFile(delete=False,suffix=".mp4") as tf:
+                            tf.write(st.session_state["vbytes"]); vp=tf.name
+                        vdur=get_dur(vp) or 60.0
+                        aout=build_audio_track(st.session_state["data"],vdur)
+                        vout=os.path.join(TMP,"kd_edited.mp4")
+                        mux(vp,aout,vout)
+                        try: os.unlink(vp)
+                        except: pass
+                        st.session_state["vid_out"]=vout
+                        st.success("✅ Done! Download from **Dub** tab.")
                     except Exception as e:
-                        st.error(f"Re-export failed: {e}")
+                        st.error(str(e))
 
-# ═══════════════════════════════════════
+# ══════════════════════════════════════════
 #  TAB 3 — SRT
-# ═══════════════════════════════════════
-with tab_srt:
-    data = st.session_state.get("dubbing_data")
+# ══════════════════════════════════════════
+with t3:
+    data=st.session_state.get("data")
     if not data:
-        st.info("🚀 Run **One-Click Dub** first.")
+        st.info("🚀 Run **Dub** tab first.")
     else:
-        st.markdown('<div class="sec-hdr">📝 SRT Subtitle</div>', unsafe_allow_html=True)
+        sk,se=st.tabs(["🇰🇭 Khmer","🇺🇸 English"])
+        with sk:
+            srt=build_srt(data,"khmer")
+            st.markdown(f"""<div style="background:var(--surface);border:1px solid var(--border);
+            border-radius:10px;padding:1rem;font-family:'JetBrains Mono',monospace;
+            font-size:.8rem;color:#94a3b8;max-height:360px;overflow-y:auto;
+            white-space:pre-wrap;line-height:1.9;">{srt}</div>""",unsafe_allow_html=True)
+            st.download_button("📥 Download Khmer SRT",srt.encode("utf-8"),
+                               "khmer.srt","text/plain",use_container_width=True)
+        with se:
+            srt=build_srt(data,"english")
+            st.markdown(f"""<div style="background:var(--surface);border:1px solid var(--border);
+            border-radius:10px;padding:1rem;font-family:'JetBrains Mono',monospace;
+            font-size:.8rem;color:#94a3b8;max-height:360px;overflow-y:auto;
+            white-space:pre-wrap;line-height:1.9;">{srt}</div>""",unsafe_allow_html=True)
+            st.download_button("📥 Download English SRT",srt.encode("utf-8"),
+                               "english.srt","text/plain",use_container_width=True)
 
-        tk, te = st.tabs(["🇰🇭 Khmer", "🇺🇸 English"])
-
-        with tk:
-            srt_kh = build_srt(data, "khmer")
-            st.markdown(f'<div class="srt-box">{srt_kh}</div>', unsafe_allow_html=True)
-            st.download_button(
-                "📥 Download Khmer SRT",
-                srt_kh.encode("utf-8"),
-                "khmer_subtitle.srt", "text/plain",
-                use_container_width=True
-            )
-
-        with te:
-            srt_en = build_srt(data, "english")
-            st.markdown(f'<div class="srt-box">{srt_en}</div>', unsafe_allow_html=True)
-            st.download_button(
-                "📥 Download English SRT",
-                srt_en.encode("utf-8"),
-                "english_subtitle.srt", "text/plain",
-                use_container_width=True
-            )
-
-# ═══════════════════════════════════════
+# ──────────────────────────────────────────
 #  FOOTER
-# ═══════════════════════════════════════
-st.markdown("---")
-st.markdown('<p style="text-align:center;color:#b0b8d0;font-size:0.78rem;">KhmerDub v2.2 · Gemini 2.5 Flash · Edge TTS · ElevenLabs · FFmpeg</p>', unsafe_allow_html=True)
+# ──────────────────────────────────────────
+st.markdown("""
+<div style="text-align:center;padding:2rem 0 1rem;
+color:var(--muted);font-size:.75rem;letter-spacing:.5px;">
+KhmerDub v3.0 &nbsp;·&nbsp; Gemini AI &nbsp;·&nbsp; Edge TTS &nbsp;·&nbsp; ElevenLabs &nbsp;·&nbsp; FFmpeg
+</div>""", unsafe_allow_html=True)
