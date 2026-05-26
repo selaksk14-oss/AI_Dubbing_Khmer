@@ -198,7 +198,7 @@ EDGE_VOICES = {
     "Sreymom (ស្ត្រី — Microsoft)": "km-KH-SreymomNeural",
 }
 # Gemini model — updated to stable name
-GEMINI_MODEL = "gemini-2.5-flash-preview-05-20"
+GEMINI_MODEL = "gemini-1.5-flash"
 
 # ═══════════════════════════════════════
 #  HELPERS — API KEY (secrets or manual)
